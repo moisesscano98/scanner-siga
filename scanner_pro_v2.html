@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Scanner PRO</title>
+
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jscanify@1.4.0/src/jscanify.min.js"></script>
+
+<style>
+:root{
+  --bg:#06111f;
+  --panel:#0b1728;
+  --green:#10b981;
+  --green2:#34d399;
+  --amber:#f59e0b;
+  --red:#ef4444;
+  --text:#f8fafc;
+  --muted:#94a3b8;
+}
+*{box-sizing:border-box}
+html,body{
+  margin:0;
+  width:100%;
+  height:100%;
+  background:var(--bg);
+  color:var(--text);
+  font-family:Arial,Helvetica,sans-serif;
+  overflow:hidden;
+}
+.app{
+  width:100%;
+  height:100%;
+  display:flex;
+  flex-direction:column;
+}
+.top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:12px 14px;
+  padding-top:max(12px,env(safe-area-inset-top));
+  background:rgba(6,17,31,.96);
+  border-bottom:1px solid rgba(255,255,255,.08);
+  z-index:10;
+}
+.title strong{
+  display:block;
+  font-size:14px;
+}
+.title small{
+  display:block;
+  margin-top:2px;
+  font-size:9px;
+  color:var(--muted);
+}
+.cancel{
+  border:none;
+  border-radius:12px;
+  padding:10px 13px;
+  background:#7f1d1d;
+  color:white;
+  font-size:11px;
+  font-weight:900;
+}
+.camera{
+  position:relative;
+  flex:1;
+  min-height:0;
+  background:#000;
+  overflow:hidden;
+}
+video{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block;
+}
+#overlay{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  pointer-events:none;
+}
+.statusWrap{
+  position:absolute;
+  left:10px;
+  right:10px;
+  bottom:12px;
+  display:flex;
+  justify-content:center;
+}
+.status{
+  max-width:95%;
+  padding:9px 13px;
+  border-radius:999px;
+  background:rgba(15,23,42,.86);
+  border:1px solid rgba(255,255,255,.16);
+  font-size:10px;
+  font-weight:900;
+  backdrop-filter:blur(10px);
+}
+.status.ok{background:rgba(5,150,105,.9);border-color:#6ee7b7}
+.status.wait{background:rgba(180,83,9,.9)}
+.status.err{background:rgba(185,28,28,.9)}
+.bottom{
+  padding:11px 12px max(12px,env(safe-area-inset-bottom));
+  background:var(--panel);
+  border-top:1px solid rgba(255,255,255,.08);
+}
+.progress{
+  display:flex;
+  gap:7px;
+  margin-bottom:9px;
+}
+.step{
+  flex:1;
+  text-align:center;
+  padding:7px 4px;
+  border-radius:10px;
+  background:#152238;
+  color:#64748b;
+  font-size:9px;
+  font-weight:900;
+}
+.step.active{background:#172554;color:#93c5fd}
+.step.ok{background:#064e3b;color:#6ee7b7}
+.controls{
+  display:grid;
+  grid-template-columns:1fr 105px;
+  gap:8px;
+}
+.capture{
+  min-height:48px;
+  border:none;
+  border-radius:14px;
+  background:linear-gradient(135deg,#059669,#0ea5a8);
+  color:white;
+  font-size:12px;
+  font-weight:900;
+}
+.auto{
+  border:1px solid rgba(255,255,255,.13);
+  border-radius:14px;
+  background:#172033;
+  color:#cbd5e1;
+  font-size:9px;
+  font-weight:900;
+}
+.auto.on{
+  background:rgba(16,185,129,.18);
+  border-color:rgba(52,211,153,.45);
+  color:#6ee7b7;
+}
+.finish{
+  display:none;
+  width:100%;
+  margin-top:8px;
+  min-height:46px;
+  border:none;
+  border-radius:14px;
+  background:linear-gradient(135deg,#2563eb,#7c3aed);
+  color:#fff;
+  font-size:11px;
+  font-weight:900;
+}
+.thumbRow{
+  display:flex;
+  gap:6px;
+  margin-top:8px;
+  overflow:auto;
+}
+.thumb{
+  width:48px;
+  height:64px;
+  object-fit:cover;
+  border-radius:8px;
+  border:1px solid rgba(255,255,255,.14);
+}
+.loader{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:#06111f;
+  z-index:20;
+  font-size:12px;
+  font-weight:900;
+}
+.hidden{display:none!important}
+</style>
+</head>
+
+<body>
+<div class="app">
+  <div class="top">
+    <div class="title">
+      <strong>📄 Scanner PRO</strong>
+      <small>Hoja completa · autocaptura · 4 páginas</small>
+    </div>
+
+    <button class="cancel" onclick="cancelarEscaneo()">
+      ✕ Cancelar
+    </button>
+  </div>
+
+  <div class="camera">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+    <canvas id="analysis" class="hidden"></canvas>
+
+    <div class="statusWrap">
+      <div id="status" class="status wait">
+        ⚙️ Preparando cámara...
+      </div>
+    </div>
+
+    <div id="loader" class="loader">
+      ⚙️ Preparando detector...
+    </div>
+  </div>
+
+  <div class="bottom">
+    <div class="progress">
+      <div id="s1" class="step active">1</div>
+      <div id="s2" class="step">2</div>
+      <div id="s3" class="step">3</div>
+      <div id="s4" class="step">4</div>
+    </div>
+
+    <div class="controls">
+      <button id="btnCapture" class="capture" onclick="capturar(false)">
+        📸 Capturar página 1
+      </button>
+
+      <button id="btnAuto" class="auto on" onclick="toggleAuto()">
+        ⚡ AUTO ON
+      </button>
+    </div>
+
+    <button id="btnFinish" class="finish" onclick="enviarResultado()">
+      ✅ Usar las 4 páginas
+    </button>
+
+    <div id="thumbRow" class="thumbRow"></div>
+  </div>
+</div>
+
+<script>
+let stream = null;
+let scanner = null;
+let cvReady = false;
+let autoCapture = true;
+let page = 1;
+let pages = [];
+let lastCorners = null;
+let stable = 0;
+let waitingRemoval = false;
+let removalFrames = 0;
+let busy = false;
+let timer = null;
+
+const ANALYZE_MS = 300;
+const ANALYSIS_WIDTH = 640;
+const STABLE_FRAMES = 5;
+const STABLE_MOVE = 6;
+const REMOVAL_FRAMES = 2;
+
+const MIN_COVERAGE = 0.38;
+const MAX_COVERAGE = 0.96;
+const MIN_ASPECT = 0.48;
+const MAX_ASPECT = 0.92;
+const MIN_EDGE_BALANCE = 0.46;
+
+function setStatus(text,type="wait"){
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className = "status " + type;
+}
+
+function cornersValid(p){
+  return !!(
+    p &&
+    p.topLeftCorner &&
+    p.topRightCorner &&
+    p.bottomLeftCorner &&
+    p.bottomRightCorner
+  );
+}
+
+function dist(a,b){
+  if(!a || !b) return 9999;
+  return Math.hypot((a.x||0)-(b.x||0),(a.y||0)-(b.y||0));
+}
+
+function movement(a,b){
+  if(!cornersValid(a)||!cornersValid(b)) return 9999;
+  const ks=["topLeftCorner","topRightCorner","bottomLeftCorner","bottomRightCorner"];
+  return ks.reduce((s,k)=>s+dist(a[k],b[k]),0)/4;
+}
+
+function polygonArea(p){
+  if(!cornersValid(p)) return 0;
+  const pts=[p.topLeftCorner,p.topRightCorner,p.bottomRightCorner,p.bottomLeftCorner];
+  let area=0;
+  for(let i=0;i<4;i++){
+    const j=(i+1)%4;
+    area += pts[i].x*pts[j].y - pts[j].x*pts[i].y;
+  }
+  return Math.abs(area/2);
+}
+
+
+function validateDocumentContour(p,width,height){
+  if(!cornersValid(p)) return {ok:false,reason:"No se detectaron cuatro esquinas."};
+
+  const pts=[p.topLeftCorner,p.topRightCorner,p.bottomRightCorner,p.bottomLeftCorner];
+
+  const inside=pts.every(q =>
+    Number.isFinite(Number(q.x)) &&
+    Number.isFinite(Number(q.y)) &&
+    q.x>=0 && q.y>=0 && q.x<=width && q.y<=height
+  );
+  if(!inside) return {ok:false,reason:"Contorno fuera de cámara."};
+
+  const coverage=polygonArea(p)/(width*height);
+  if(coverage<MIN_COVERAGE){
+    return {ok:false,reason:"Rectángulo demasiado pequeño.",coverage};
+  }
+  if(coverage>MAX_COVERAGE){
+    return {ok:false,reason:"Separa ligeramente la cámara.",coverage};
+  }
+
+  const d=(a,b)=>Math.hypot((a.x||0)-(b.x||0),(a.y||0)-(b.y||0));
+  const top=d(p.topLeftCorner,p.topRightCorner);
+  const bottom=d(p.bottomLeftCorner,p.bottomRightCorner);
+  const left=d(p.topLeftCorner,p.bottomLeftCorner);
+  const right=d(p.topRightCorner,p.bottomRightCorner);
+
+  const avgW=(top+bottom)/2;
+  const avgH=(left+right)/2;
+  if(avgW<=0 || avgH<=0) return {ok:false,reason:"Contorno inválido."};
+
+  const aspect=avgW/avgH;
+  if(aspect<MIN_ASPECT || aspect>MAX_ASPECT){
+    return {ok:false,reason:"No tiene forma de hoja.",aspect};
+  }
+
+  const hb=Math.min(top,bottom)/Math.max(top,bottom);
+  const vb=Math.min(left,right)/Math.max(left,right);
+  if(hb<MIN_EDGE_BALANCE || vb<MIN_EDGE_BALANCE){
+    return {ok:false,reason:"Perspectiva demasiado extrema."};
+  }
+
+  const cx=pts.reduce((s,q)=>s+q.x,0)/4;
+  const cy=pts.reduce((s,q)=>s+q.y,0)/4;
+  const dx=Math.abs(cx-width/2)/width;
+  const dy=Math.abs(cy-height/2)/height;
+  if(dx>0.28 || dy>0.28){
+    return {ok:false,reason:"Centra mejor la hoja."};
+  }
+
+  return {ok:true,coverage,aspect};
+}
+
+function scaleCorners(p,sx,sy){
+  if(!cornersValid(p)) return null;
+  const c=q=>({x:q.x*sx,y:q.y*sy});
+  return {
+    topLeftCorner:c(p.topLeftCorner),
+    topRightCorner:c(p.topRightCorner),
+    bottomLeftCorner:c(p.bottomLeftCorner),
+    bottomRightCorner:c(p.bottomRightCorner)
+  };
+}
+
+function drawOverlay(corners){
+  const overlay=document.getElementById("overlay");
+  const ctx=overlay.getContext("2d");
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+
+  if(!cornersValid(corners)){
+    const mx=overlay.width*.10;
+    const my=overlay.height*.08;
+    ctx.strokeStyle="rgba(255,255,255,.38)";
+    ctx.lineWidth=Math.max(3,overlay.width*.004);
+    ctx.setLineDash([18,13]);
+    ctx.strokeRect(mx,my,overlay.width-mx*2,overlay.height-my*2);
+    ctx.setLineDash([]);
+    return;
+  }
+
+  const p=corners;
+  ctx.beginPath();
+  ctx.moveTo(p.topLeftCorner.x,p.topLeftCorner.y);
+  ctx.lineTo(p.topRightCorner.x,p.topRightCorner.y);
+  ctx.lineTo(p.bottomRightCorner.x,p.bottomRightCorner.y);
+  ctx.lineTo(p.bottomLeftCorner.x,p.bottomLeftCorner.y);
+  ctx.closePath();
+
+  ctx.fillStyle="rgba(16,185,129,.08)";
+  ctx.fill();
+  ctx.strokeStyle="#34d399";
+  ctx.lineWidth=Math.max(4,overlay.width*.005);
+  ctx.shadowColor="rgba(16,185,129,.9)";
+  ctx.shadowBlur=14;
+  ctx.stroke();
+  ctx.shadowBlur=0;
+}
+
+function updateUI(){
+  for(let i=1;i<=4;i++){
+    const el=document.getElementById("s"+i);
+    el.className="step";
+    if(i<page || pages[i-1]) el.classList.add("ok");
+    else if(i===page) el.classList.add("active");
+  }
+
+  const cap=document.getElementById("btnCapture");
+  cap.textContent=page<=4 ? `📸 Capturar página ${page}` : "✅ Completado";
+  cap.disabled=page>4;
+
+  document.getElementById("btnFinish").style.display =
+    pages.length===4 ? "block" : "none";
+}
+
+async function waitOpenCV(){
+  const start=Date.now();
+  while(Date.now()-start < 18000){
+    try{
+      if(window.cv && typeof cv.imread==="function" && typeof window.jscanify==="function"){
+        scanner=new jscanify();
+        cvReady=true;
+        return true;
+      }
+    }catch(e){}
+    await new Promise(r=>setTimeout(r,250));
+  }
+  return false;
+}
+
+async function start(){
+  const ok=await waitOpenCV();
+  document.getElementById("loader").classList.add("hidden");
+
+  if(!ok){
+    setStatus("⚠️ Detector no disponible. Puedes capturar manualmente.","wait");
+  }
+
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{
+        facingMode:{ideal:"environment"},
+        width:{ideal:1920},
+        height:{ideal:1080}
+      },
+      audio:false
+    });
+
+    const video=document.getElementById("video");
+    video.srcObject=stream;
+    await video.play();
+
+    const overlay=document.getElementById("overlay");
+    overlay.width=video.videoWidth;
+    overlay.height=video.videoHeight;
+
+    const analysis=document.getElementById("analysis");
+    const sc=Math.min(1,ANALYSIS_WIDTH/video.videoWidth);
+    analysis.width=Math.max(1,Math.round(video.videoWidth*sc));
+    analysis.height=Math.max(1,Math.round(video.videoHeight*sc));
+
+    timer=setInterval(analyze,ANALYZE_MS);
+    setStatus("📄 Coloca el documento dentro del marco","wait");
+  }catch(err){
+    document.getElementById("loader").classList.add("hidden");
+    setStatus("❌ No se pudo abrir la cámara.","err");
+    alert("No se pudo abrir la cámara. Revisa permisos del navegador.");
+  }
+}
+
+async function analyze(){
+  if(busy || !cvReady || !scanner || page>4) return;
+
+  const video=document.getElementById("video");
+  const analysis=document.getElementById("analysis");
+  if(video.readyState<2) return;
+
+  const ctx=analysis.getContext("2d",{alpha:false});
+  ctx.drawImage(video,0,0,analysis.width,analysis.height);
+
+  let mat=null, contour=null, corners=null;
+  try{
+    mat=cv.imread(analysis);
+    contour=scanner.findPaperContour(mat);
+    corners=scanner.getCornerPoints(contour);
+  }catch(e){
+    corners=null;
+  }finally{
+    try{if(mat)mat.delete()}catch(e){}
+    try{if(contour)contour.delete()}catch(e){}
+  }
+
+  if(!cornersValid(corners)){
+    stable=0;
+    lastCorners=null;
+    drawOverlay(null);
+
+    if(waitingRemoval){
+      removalFrames++;
+      if(removalFrames>=REMOVAL_FRAMES){
+        waitingRemoval=false;
+        removalFrames=0;
+      }
+      setStatus("🔄 Retira la hoja y coloca la siguiente","wait");
+    }else{
+      setStatus("📄 Coloca la hoja completa dentro del marco","wait");
+    }
+    return;
+  }
+
+  const valid=validateDocumentContour(corners,analysis.width,analysis.height);
+
+  if(!valid.ok){
+    stable=0;
+    lastCorners=null;
+    drawOverlay(null);
+
+    if(valid.coverage && valid.coverage<MIN_COVERAGE){
+      setStatus("🔎 Detecté un cuadro pequeño. Acerca y centra la hoja completa.","wait");
+    }else{
+      setStatus("🟡 "+valid.reason,"wait");
+    }
+    return;
+  }
+
+  const mv=movement(corners,lastCorners);
+  stable = mv<=STABLE_MOVE ? stable+1 : 0;
+  lastCorners=corners;
+
+  const scaled=scaleCorners(
+    corners,
+    video.videoWidth/analysis.width,
+    video.videoHeight/analysis.height
+  );
+  drawOverlay(scaled);
+
+  if(waitingRemoval){
+    setStatus(`✅ Página ${page-1} guardada · retira la hoja`,"ok");
+    return;
+  }
+
+  if(stable>=STABLE_FRAMES){
+    setStatus(autoCapture ? "🟢 Documento estable · capturando..." : "🟢 Documento listo","ok");
+    if(autoCapture){
+      stable=0;
+      await capturar(true,scaled);
+    }
+  }else{
+    setStatus("🟢 Hoja completa detectada · mantén estable","ok");
+  }
+}
+
+async function capturar(automatic=false, corners=null){
+  if(busy || page>4) return;
+  busy=true;
+
+  try{
+    const video=document.getElementById("video");
+    const canvas=document.createElement("canvas");
+    canvas.width=video.videoWidth;
+    canvas.height=video.videoHeight;
+    const ctx=canvas.getContext("2d",{alpha:false});
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+
+    let resultCanvas=null;
+
+    if(cvReady && scanner && cornersValid(corners)){
+      try{
+        resultCanvas=scanner.extractPaper(canvas,1400,1980,corners);
+      }catch(e){
+        resultCanvas=null;
+      }
+    }
+
+    let dataUrl;
+    if(resultCanvas){
+      const final=document.createElement("canvas");
+      final.width=1400;
+      final.height=1980;
+      const fctx=final.getContext("2d",{alpha:false});
+      fctx.fillStyle="#fff";
+      fctx.fillRect(0,0,final.width,final.height);
+      fctx.filter="contrast(1.05) brightness(1.02)";
+      fctx.drawImage(resultCanvas,0,0,final.width,final.height);
+      dataUrl=final.toDataURL("image/jpeg",.9);
+    }else{
+      const max=1700;
+      const sc=Math.min(1,max/Math.max(canvas.width,canvas.height));
+      const small=document.createElement("canvas");
+      small.width=Math.round(canvas.width*sc);
+      small.height=Math.round(canvas.height*sc);
+      small.getContext("2d",{alpha:false}).drawImage(canvas,0,0,small.width,small.height);
+      dataUrl=small.toDataURL("image/jpeg",.88);
+    }
+
+    pages[page-1]=dataUrl;
+    addThumb(dataUrl);
+    page++;
+    waitingRemoval=page<=4;
+    removalFrames=0;
+    stable=0;
+    lastCorners=null;
+    updateUI();
+
+    if(page>4){
+      setStatus("✅ 4 de 4 páginas listas","ok");
+    }else{
+      setStatus(`✅ Página ${page-1} lista · coloca página ${page}`,"ok");
+    }
+  }catch(err){
+    setStatus("❌ No se pudo procesar la página","err");
+  }finally{
+    busy=false;
+  }
+}
+
+function addThumb(dataUrl){
+  const img=document.createElement("img");
+  img.className="thumb";
+  img.src=dataUrl;
+  document.getElementById("thumbRow").appendChild(img);
+}
+
+function toggleAuto(){
+  autoCapture=!autoCapture;
+  const btn=document.getElementById("btnAuto");
+  btn.classList.toggle("on",autoCapture);
+  btn.textContent=autoCapture ? "⚡ AUTO ON" : "⚡ AUTO OFF";
+}
+
+function detenerCamara(){
+  if(timer){
+    clearInterval(timer);
+    timer=null;
+  }
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream=null;
+  }
+}
+
+function cancelarEscaneo(){
+  detenerCamara();
+
+  try{
+    if(window.opener){
+      window.opener.postMessage({
+        type:"SCANNER_PRO_CANCEL"
+      },"*");
+    }
+  }catch(e){}
+
+  if(history.length>1){
+    history.back();
+    setTimeout(()=>window.close(),250);
+  }else{
+    window.close();
+  }
+}
+
+function enviarResultado(){
+  if(pages.length!==4){
+    alert("Faltan páginas por capturar.");
+    return;
+  }
+
+  detenerCamara();
+
+  if(!window.opener){
+    alert("No se encontró la página principal.");
+    return;
+  }
+
+  window.opener.postMessage({
+    type:"SCANNER_PRO_RESULT",
+    pages:pages
+  },"*");
+
+  setTimeout(()=>window.close(),250);
+}
+
+window.addEventListener("beforeunload",detenerCamara);
+start();
+</script>
+</body>
+</html>
