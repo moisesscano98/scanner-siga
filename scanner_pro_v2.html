@@ -270,11 +270,23 @@ const STABLE_FRAMES = 5;
 const STABLE_MOVE = 6;
 const REMOVAL_FRAMES = 2;
 
-const MIN_COVERAGE = 0.38;
-const MAX_COVERAGE = 0.96;
-const MIN_ASPECT = 0.48;
-const MAX_ASPECT = 0.92;
-const MIN_EDGE_BALANCE = 0.46;
+const MIN_COVERAGE = 0.42;
+const MAX_COVERAGE = 0.97;
+const MIN_ASPECT = 0.46;
+const MAX_ASPECT = 0.95;
+const MIN_EDGE_BALANCE = 0.52;
+
+/*
+ * V3 - objetivo "escaneo limpio":
+ * - priorizar el borde EXTERIOR de la hoja
+ * - ignorar cuadros/tablas internas
+ * - limpiar fondo del papel
+ * - mejorar texto sin destruir firmas o sellos
+ */
+const OUTPUT_LONG = 1980;
+const OUTPUT_SHORT = 1400;
+const PAPER_WHITE_START = 175;
+const PAPER_WHITE_STRENGTH = 0.72;
 
 function setStatus(text,type="wait"){
   const el = document.getElementById("status");
@@ -312,6 +324,316 @@ function polygonArea(p){
     area += pts[i].x*pts[j].y - pts[j].x*pts[i].y;
   }
   return Math.abs(area/2);
+}
+
+
+
+/* =====================================================
+   DETECTOR PROPIO DE HOJA COMPLETA
+   Busca el mayor cuadrilátero EXTERIOR del frame.
+===================================================== */
+
+function orderCorners(points){
+  if(!Array.isArray(points) || points.length!==4) return null;
+
+  const sum = points.slice().sort((a,b)=>(a.x+a.y)-(b.x+b.y));
+  const diff = points.slice().sort((a,b)=>(a.x-a.y)-(b.x-b.y));
+
+  return {
+    topLeftCorner:sum[0],
+    bottomRightCorner:sum[3],
+    bottomLeftCorner:diff[0],
+    topRightCorner:diff[3]
+  };
+}
+
+function detectFullSheet(canvas){
+  let src=null, gray=null, blur=null, edges=null;
+  let kernel=null, contours=null, hierarchy=null;
+
+  try{
+    src=cv.imread(canvas);
+    gray=new cv.Mat();
+    blur=new cv.Mat();
+    edges=new cv.Mat();
+    contours=new cv.MatVector();
+    hierarchy=new cv.Mat();
+
+    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+
+    cv.GaussianBlur(
+      gray,
+      blur,
+      new cv.Size(5,5),
+      0,
+      0,
+      cv.BORDER_DEFAULT
+    );
+
+    /*
+     * Canny detecta los bordes físicos de la hoja.
+     * Después cerramos pequeños huecos para formar
+     * un contorno exterior continuo.
+     */
+    cv.Canny(
+      blur,
+      edges,
+      55,
+      155
+    );
+
+    kernel=cv.Mat.ones(5,5,cv.CV_8U);
+
+    cv.morphologyEx(
+      edges,
+      edges,
+      cv.MORPH_CLOSE,
+      kernel
+    );
+
+    cv.dilate(
+      edges,
+      edges,
+      kernel
+    );
+
+    cv.findContours(
+      edges,
+      contours,
+      hierarchy,
+      cv.RETR_EXTERNAL,
+      cv.CHAIN_APPROX_SIMPLE
+    );
+
+    const frameArea=canvas.width*canvas.height;
+    let best=null;
+    let bestArea=0;
+
+    for(let i=0;i<contours.size();i++){
+      const contour=contours.get(i);
+      const area=cv.contourArea(contour);
+
+      if(area < frameArea*0.20){
+        contour.delete();
+        continue;
+      }
+
+      const peri=cv.arcLength(contour,true);
+      const approx=new cv.Mat();
+
+      /*
+       * Probamos dos tolerancias.
+       * Ayuda cuando una esquina de la hoja no está perfecta.
+       */
+      cv.approxPolyDP(contour,approx,0.018*peri,true);
+
+      let points=null;
+
+      if(approx.rows===4){
+        points=[];
+        for(let r=0;r<4;r++){
+          const p=approx.intPtr(r,0);
+          points.push({x:p[0],y:p[1]});
+        }
+      }else{
+        approx.delete();
+
+        const approx2=new cv.Mat();
+        cv.approxPolyDP(contour,approx2,0.03*peri,true);
+
+        if(approx2.rows===4){
+          points=[];
+          for(let r=0;r<4;r++){
+            const p=approx2.intPtr(r,0);
+            points.push({x:p[0],y:p[1]});
+          }
+        }
+
+        approx2.delete();
+        contour.delete();
+
+        if(!points) continue;
+
+        const ordered=orderCorners(points);
+        const valid=validateDocumentContour(
+          ordered,
+          canvas.width,
+          canvas.height
+        );
+
+        if(valid.ok && area>bestArea){
+          best=ordered;
+          bestArea=area;
+        }
+
+        continue;
+      }
+
+      approx.delete();
+      contour.delete();
+
+      if(!points) continue;
+
+      const ordered=orderCorners(points);
+      const valid=validateDocumentContour(
+        ordered,
+        canvas.width,
+        canvas.height
+      );
+
+      if(valid.ok && area>bestArea){
+        best=ordered;
+        bestArea=area;
+      }
+    }
+
+    return best;
+
+  }catch(err){
+    console.warn("Detector de hoja completa:",err);
+    return null;
+  }finally{
+    try{if(src)src.delete()}catch(e){}
+    try{if(gray)gray.delete()}catch(e){}
+    try{if(blur)blur.delete()}catch(e){}
+    try{if(edges)edges.delete()}catch(e){}
+    try{if(kernel)kernel.delete()}catch(e){}
+    try{if(contours)contours.delete()}catch(e){}
+    try{if(hierarchy)hierarchy.delete()}catch(e){}
+  }
+}
+
+
+/* =====================================================
+   LIMPIEZA TIPO ESCÁNER
+   Levanta el papel hacia blanco y mantiene texto/color.
+===================================================== */
+
+function cleanDocumentCanvas(inputCanvas){
+  const out=document.createElement("canvas");
+  out.width=inputCanvas.width;
+  out.height=inputCanvas.height;
+
+  const ctx=out.getContext("2d",{alpha:false});
+  ctx.fillStyle="#fff";
+  ctx.fillRect(0,0,out.width,out.height);
+  ctx.drawImage(inputCanvas,0,0);
+
+  /*
+   * 1) Nitidez suave con OpenCV.
+   */
+  let src=null, blur=null, sharp=null;
+
+  try{
+    src=cv.imread(out);
+    blur=new cv.Mat();
+    sharp=new cv.Mat();
+
+    cv.GaussianBlur(
+      src,
+      blur,
+      new cv.Size(0,0),
+      1.05,
+      1.05,
+      cv.BORDER_DEFAULT
+    );
+
+    cv.addWeighted(
+      src,
+      1.30,
+      blur,
+      -0.30,
+      1,
+      sharp
+    );
+
+    cv.imshow(out,sharp);
+
+  }catch(e){
+    console.warn("Nitidez no disponible:",e);
+  }finally{
+    try{if(src)src.delete()}catch(e){}
+    try{if(blur)blur.delete()}catch(e){}
+    try{if(sharp)sharp.delete()}catch(e){}
+  }
+
+  /*
+   * 2) Limpiar papel gris/amarillento sin pasar a B/N.
+   *    Los píxeles claros se empujan hacia blanco;
+   *    los oscuros conservan detalle.
+   */
+  try{
+    const image=ctx.getImageData(0,0,out.width,out.height);
+    const d=image.data;
+
+    for(let i=0;i<d.length;i+=4){
+      let r=d[i];
+      let g=d[i+1];
+      let b=d[i+2];
+
+      const lum=0.2126*r+0.7152*g+0.0722*b;
+
+      if(lum>=PAPER_WHITE_START){
+        const t=Math.min(
+          1,
+          (lum-PAPER_WHITE_START)/(255-PAPER_WHITE_START)
+        );
+
+        const lift=
+          PAPER_WHITE_STRENGTH*(0.55+0.45*t);
+
+        r=r+(255-r)*lift;
+        g=g+(255-g)*lift;
+        b=b+(255-b)*lift;
+      }else{
+        /*
+         * Contraste moderado del texto.
+         */
+        const k=1.06;
+        r=128+(r-128)*k;
+        g=128+(g-128)*k;
+        b=128+(b-128)*k;
+      }
+
+      d[i]=Math.max(0,Math.min(255,r));
+      d[i+1]=Math.max(0,Math.min(255,g));
+      d[i+2]=Math.max(0,Math.min(255,b));
+    }
+
+    ctx.putImageData(image,0,0);
+  }catch(e){
+    console.warn("Limpieza de papel:",e);
+  }
+
+  return out;
+}
+
+
+/* =====================================================
+   TAMAÑO DE SALIDA SEGÚN ORIENTACIÓN DEL DOCUMENTO
+===================================================== */
+
+function outputSizeFromCorners(p){
+  if(!cornersValid(p)){
+    return {width:OUTPUT_SHORT,height:OUTPUT_LONG};
+  }
+
+  const d=(a,b)=>Math.hypot(
+    (a.x||0)-(b.x||0),
+    (a.y||0)-(b.y||0)
+  );
+
+  const w=(d(p.topLeftCorner,p.topRightCorner)+
+           d(p.bottomLeftCorner,p.bottomRightCorner))/2;
+
+  const h=(d(p.topLeftCorner,p.bottomLeftCorner)+
+           d(p.topRightCorner,p.bottomRightCorner))/2;
+
+  if(w>h){
+    return {width:OUTPUT_LONG,height:OUTPUT_SHORT};
+  }
+
+  return {width:OUTPUT_SHORT,height:OUTPUT_LONG};
 }
 
 
@@ -384,8 +706,8 @@ function drawOverlay(corners){
   ctx.clearRect(0,0,overlay.width,overlay.height);
 
   if(!cornersValid(corners)){
-    const mx=overlay.width*.10;
-    const my=overlay.height*.08;
+    const mx=overlay.width*.12;
+    const my=overlay.height*.06;
     ctx.strokeStyle="rgba(255,255,255,.38)";
     ctx.lineWidth=Math.max(3,overlay.width*.004);
     ctx.setLineDash([18,13]);
@@ -493,16 +815,38 @@ async function analyze(){
   const ctx=analysis.getContext("2d",{alpha:false});
   ctx.drawImage(video,0,0,analysis.width,analysis.height);
 
-  let mat=null, contour=null, corners=null;
-  try{
-    mat=cv.imread(analysis);
-    contour=scanner.findPaperContour(mat);
-    corners=scanner.getCornerPoints(contour);
-  }catch(e){
-    corners=null;
-  }finally{
-    try{if(mat)mat.delete()}catch(e){}
-    try{if(contour)contour.delete()}catch(e){}
+  let corners=null;
+
+  /*
+   * Primero usamos nuestro detector de hoja completa.
+   * Sólo si no encuentra nada recurrimos a jscanify.
+   */
+  corners=detectFullSheet(analysis);
+
+  if(!corners){
+    let mat=null, contour=null;
+
+    try{
+      mat=cv.imread(analysis);
+      contour=scanner.findPaperContour(mat);
+      const candidate=scanner.getCornerPoints(contour);
+
+      if(
+        validateDocumentContour(
+          candidate,
+          analysis.width,
+          analysis.height
+        ).ok
+      ){
+        corners=candidate;
+      }
+
+    }catch(e){
+      corners=null;
+    }finally{
+      try{if(mat)mat.delete()}catch(e){}
+      try{if(contour)contour.delete()}catch(e){}
+    }
   }
 
   if(!cornersValid(corners)){
@@ -531,7 +875,7 @@ async function analyze(){
     drawOverlay(null);
 
     if(valid.coverage && valid.coverage<MIN_COVERAGE){
-      setStatus("🔎 Detecté un cuadro pequeño. Acerca y centra la hoja completa.","wait");
+      setStatus("🔎 Aún no veo la hoja completa. Acércala y deja visibles sus 4 bordes.","wait");
     }else{
       setStatus("🟡 "+valid.reason,"wait");
     }
@@ -578,34 +922,82 @@ async function capturar(automatic=false, corners=null){
     ctx.drawImage(video,0,0,canvas.width,canvas.height);
 
     let resultCanvas=null;
+    let finalCorners=corners;
 
-    if(cvReady && scanner && cornersValid(corners)){
+    /*
+     * Si la captura fue manual y no tenemos esquinas,
+     * intentamos detectar nuevamente sobre el frame completo.
+     */
+    if(
+      cvReady &&
+      scanner &&
+      !cornersValid(finalCorners)
+    ){
+      finalCorners=detectFullSheet(canvas);
+    }
+
+    if(
+      cvReady &&
+      scanner &&
+      cornersValid(finalCorners)
+    ){
       try{
-        resultCanvas=scanner.extractPaper(canvas,1400,1980,corners);
+        const outSize=outputSizeFromCorners(finalCorners);
+
+        resultCanvas=scanner.extractPaper(
+          canvas,
+          outSize.width,
+          outSize.height,
+          finalCorners
+        );
       }catch(e){
         resultCanvas=null;
       }
     }
 
     let dataUrl;
+
     if(resultCanvas){
-      const final=document.createElement("canvas");
-      final.width=1400;
-      final.height=1980;
-      const fctx=final.getContext("2d",{alpha:false});
-      fctx.fillStyle="#fff";
-      fctx.fillRect(0,0,final.width,final.height);
-      fctx.filter="contrast(1.05) brightness(1.02)";
-      fctx.drawImage(resultCanvas,0,0,final.width,final.height);
-      dataUrl=final.toDataURL("image/jpeg",.9);
+      /*
+       * Procesamiento tipo escáner:
+       * - papel más blanco
+       * - texto más definido
+       * - colores y firmas conservados
+       */
+      const cleaned=cleanDocumentCanvas(resultCanvas);
+
+      dataUrl=cleaned.toDataURL(
+        "image/jpeg",
+        .93
+      );
+
+      cleaned.width=1;
+      cleaned.height=1;
+
+      try{
+        resultCanvas.width=1;
+        resultCanvas.height=1;
+      }catch(e){}
+
     }else{
-      const max=1700;
+      /*
+       * Fallback seguro: NO deformar si la hoja no fue detectada.
+       */
+      const max=1800;
       const sc=Math.min(1,max/Math.max(canvas.width,canvas.height));
       const small=document.createElement("canvas");
       small.width=Math.round(canvas.width*sc);
       small.height=Math.round(canvas.height*sc);
-      small.getContext("2d",{alpha:false}).drawImage(canvas,0,0,small.width,small.height);
-      dataUrl=small.toDataURL("image/jpeg",.88);
+
+      const sctx=small.getContext("2d",{alpha:false});
+      sctx.fillStyle="#fff";
+      sctx.fillRect(0,0,small.width,small.height);
+      sctx.drawImage(canvas,0,0,small.width,small.height);
+
+      dataUrl=small.toDataURL(
+        "image/jpeg",
+        .90
+      );
     }
 
     pages[page-1]=dataUrl;
