@@ -193,6 +193,67 @@ video{
 }
 .hidden{display:none!important}
 </style>
+
+<style>
+/* =====================================================
+   V4 - AUTOCAPTURA + REPETIR FOTO
+===================================================== */
+
+.thumbItem{
+  position:relative;
+  flex:0 0 auto;
+  width:66px;
+}
+
+.thumbItem .thumb{
+  width:66px;
+  height:86px;
+  display:block;
+  object-fit:cover;
+}
+
+.thumbRetake{
+  width:100%;
+  margin-top:4px;
+  padding:5px 3px;
+  border:none;
+  border-radius:7px;
+  background:#7c2d12;
+  color:#fff;
+  font-size:7px;
+  font-weight:900;
+  cursor:pointer;
+}
+
+.captureCountdown{
+  position:absolute;
+  inset:auto 50% 74px auto;
+  transform:translateX(50%);
+  display:none;
+  min-width:52px;
+  min-height:52px;
+  align-items:center;
+  justify-content:center;
+  border-radius:999px;
+  background:rgba(5,150,105,.94);
+  color:#fff;
+  font-size:23px;
+  font-weight:1000;
+  box-shadow:0 0 0 5px rgba(52,211,153,.18),
+             0 12px 28px rgba(0,0,0,.28);
+  z-index:8;
+}
+
+.captureCountdown.show{
+  display:flex;
+}
+
+@media(max-width:600px){
+  .thumbItem{width:60px}
+  .thumbItem .thumb{width:60px;height:78px}
+}
+</style>
+
 </head>
 
 <body>
@@ -212,6 +273,8 @@ video{
     <video id="video" autoplay muted playsinline></video>
     <canvas id="overlay"></canvas>
     <canvas id="analysis" class="hidden"></canvas>
+
+    <div id="captureCountdown" class="captureCountdown">3</div>
 
     <div class="statusWrap">
       <div id="status" class="status wait">
@@ -266,8 +329,8 @@ let timer = null;
 
 const ANALYZE_MS = 300;
 const ANALYSIS_WIDTH = 640;
-const STABLE_FRAMES = 5;
-const STABLE_MOVE = 6;
+const STABLE_FRAMES = 4;
+const STABLE_MOVE = 10;
 const REMOVAL_FRAMES = 2;
 
 const MIN_COVERAGE = 0.42;
@@ -637,6 +700,86 @@ function outputSizeFromCorners(p){
 }
 
 
+
+function nearFrameEdgeCount(p,width,height){
+  if(!cornersValid(p)) return 4;
+
+  const pts=[
+    p.topLeftCorner,
+    p.topRightCorner,
+    p.bottomRightCorner,
+    p.bottomLeftCorner
+  ];
+
+  const mx=width*0.025;
+  const my=height*0.025;
+
+  return pts.filter(q =>
+    q.x<=mx ||
+    q.x>=width-mx ||
+    q.y<=my ||
+    q.y>=height-my
+  ).length;
+}
+
+
+function documentBrightness(canvas,p){
+  if(!cornersValid(p) || !window.cv) return null;
+
+  let src=null, gray=null, mask=null;
+
+  try{
+    src=cv.imread(canvas);
+    gray=new cv.Mat();
+    mask=cv.Mat.zeros(src.rows,src.cols,cv.CV_8UC1);
+
+    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+
+    const pts=[
+      p.topLeftCorner,
+      p.topRightCorner,
+      p.bottomRightCorner,
+      p.bottomLeftCorner
+    ];
+
+    const data=[];
+    pts.forEach(q=>{
+      data.push(Math.round(q.x),Math.round(q.y));
+    });
+
+    const contour=cv.matFromArray(
+      4,
+      1,
+      cv.CV_32SC2,
+      data
+    );
+
+    const contours=new cv.MatVector();
+    contours.push_back(contour);
+
+    cv.fillPoly(
+      mask,
+      contours,
+      new cv.Scalar(255)
+    );
+
+    const mean=cv.mean(gray,mask)[0];
+
+    contour.delete();
+    contours.delete();
+
+    return mean;
+
+  }catch(e){
+    return null;
+  }finally{
+    try{if(src)src.delete()}catch(e){}
+    try{if(gray)gray.delete()}catch(e){}
+    try{if(mask)mask.delete()}catch(e){}
+  }
+}
+
+
 function validateDocumentContour(p,width,height){
   if(!cornersValid(p)) return {ok:false,reason:"No se detectaron cuatro esquinas."};
 
@@ -684,6 +827,25 @@ function validateDocumentContour(p,width,height){
   const dy=Math.abs(cy-height/2)/height;
   if(dx>0.28 || dy>0.28){
     return {ok:false,reason:"Centra mejor la hoja."};
+  }
+
+  /*
+   * Evita que el detector tome como documento el marco completo
+   * de la mesa/piso/pantalla. Si demasiadas esquinas están pegadas
+   * al borde del video, no lo aceptamos como hoja.
+   */
+  const edgeCount=
+    nearFrameEdgeCount(
+      p,
+      width,
+      height
+    );
+
+  if(edgeCount>=2){
+    return {
+      ok:false,
+      reason:"Veo el entorno, no la hoja completa."
+    };
   }
 
   return {ok:true,coverage,aspect};
@@ -747,7 +909,12 @@ function updateUI(){
   cap.disabled=page>4;
 
   document.getElementById("btnFinish").style.display =
-    pages.length===4 ? "block" : "none";
+    (
+      pages.length===4 &&
+      pages.every(Boolean)
+    )
+      ? "block"
+      : "none";
 }
 
 async function waitOpenCV(){
@@ -869,6 +1036,28 @@ async function analyze(){
 
   const valid=validateDocumentContour(corners,analysis.width,analysis.height);
 
+  /*
+   * Comprobación extra: el interior del cuadrilátero debe parecer
+   * papel/documento, no mesa o piso.
+   */
+  if(valid.ok){
+
+    const brillo=
+      documentBrightness(
+        analysis,
+        corners
+      );
+
+    if(
+      brillo !== null &&
+      brillo < 128
+    ){
+      valid.ok=false;
+      valid.reason="El área detectada no parece una hoja.";
+    }
+
+  }
+
   if(!valid.ok){
     stable=0;
     lastCorners=null;
@@ -899,15 +1088,84 @@ async function analyze(){
   }
 
   if(stable>=STABLE_FRAMES){
-    setStatus(autoCapture ? "🟢 Documento estable · capturando..." : "🟢 Documento listo","ok");
+
     if(autoCapture){
+
+      setStatus(
+        "🟢 Hoja estable · captura automática",
+        "ok"
+      );
+
       stable=0;
-      await capturar(true,scaled);
+
+      await cuentaRegresivaCaptura_();
+
+      /*
+       * Tras la cuenta, usamos las últimas esquinas válidas.
+       */
+      if(
+        !busy &&
+        page<=4
+      ){
+        await capturar(
+          true,
+          scaled
+        );
+      }
+
+    }else{
+
+      setStatus(
+        "🟢 Hoja lista · puedes capturar",
+        "ok"
+      );
+
     }
+
   }else{
-    setStatus("🟢 Hoja completa detectada · mantén estable","ok");
+
+    const faltan=
+      Math.max(
+        1,
+        STABLE_FRAMES-stable
+      );
+
+    setStatus(
+      "🟢 Hoja completa detectada · mantén estable" +
+      (autoCapture ? ` (${faltan})` : ""),
+      "ok"
+    );
+
   }
 }
+
+
+async function cuentaRegresivaCaptura_(){
+
+  const el=
+    document.getElementById(
+      "captureCountdown"
+    );
+
+  if(!el) return;
+
+  el.classList.add("show");
+
+  for(
+    const n of [3,2,1]
+  ){
+
+    el.textContent=String(n);
+
+    await new Promise(
+      r=>setTimeout(r,260)
+    );
+
+  }
+
+  el.classList.remove("show");
+}
+
 
 async function capturar(automatic=false, corners=null){
   if(busy || page>4) return;
@@ -1000,9 +1258,30 @@ async function capturar(automatic=false, corners=null){
       );
     }
 
-    pages[page-1]=dataUrl;
-    addThumb(dataUrl);
-    page++;
+    const paginaCapturada=
+      page-1;
+
+    pages[paginaCapturada]=
+      dataUrl;
+
+    addThumb(
+      dataUrl,
+      paginaCapturada
+    );
+
+    /*
+     * Avanza a la primera página que aún falte.
+     * Esto permite repetir una foto sin perder las demás.
+     */
+    const siguienteFaltante=
+      pages.findIndex(
+        p=>!p
+      );
+
+    page=
+      siguienteFaltante===-1
+        ? 5
+        : siguienteFaltante+1;
     waitingRemoval=page<=4;
     removalFrames=0;
     stable=0;
@@ -1021,11 +1300,98 @@ async function capturar(automatic=false, corners=null){
   }
 }
 
-function addThumb(dataUrl){
-  const img=document.createElement("img");
-  img.className="thumb";
-  img.src=dataUrl;
-  document.getElementById("thumbRow").appendChild(img);
+function addThumb(dataUrl,pageIndex){
+
+  const row=
+    document.getElementById(
+      "thumbRow"
+    );
+
+  let item=
+    document.getElementById(
+      "thumbItem"+pageIndex
+    );
+
+  if(!item){
+
+    item=
+      document.createElement(
+        "div"
+      );
+
+    item.className=
+      "thumbItem";
+
+    item.id=
+      "thumbItem"+pageIndex;
+
+    item.innerHTML=`
+      <img class="thumb" alt="Página ${pageIndex+1}">
+      <button
+        type="button"
+        class="thumbRetake"
+        onclick="repetirPagina(${pageIndex})"
+      >
+        ↻ Repetir
+      </button>
+    `;
+
+    row.appendChild(
+      item
+    );
+
+  }
+
+  const img=
+    item.querySelector(
+      "img"
+    );
+
+  img.src=
+    dataUrl;
+}
+
+
+function repetirPagina(index){
+
+  if(
+    busy ||
+    index<0 ||
+    index>3
+  ){
+    return;
+  }
+
+  pages[index]=null;
+
+  page=
+    index+1;
+
+  waitingRemoval=false;
+  removalFrames=0;
+  stable=0;
+  lastCorners=null;
+
+  const item=
+    document.getElementById(
+      "thumbItem"+index
+    );
+
+  if(item){
+    item.remove();
+  }
+
+  /*
+   * Si se repite una página anterior, conservamos las posteriores
+   * ya capturadas. Al terminar esta foto, buscamos la siguiente
+   * página faltante automáticamente.
+   */
+  updateUI();
+
+  setStatus(
+    `↻ Repite la página ${page}. Coloca nuevamente la hoja.`,
+    "wait"
+  );
 }
 
 function toggleAuto(){
@@ -1066,7 +1432,10 @@ function cancelarEscaneo(){
 }
 
 function enviarResultado(){
-  if(pages.length!==4){
+  if(
+    pages.length!==4 ||
+    !pages.every(Boolean)
+  ){
     alert("Faltan páginas por capturar.");
     return;
   }
